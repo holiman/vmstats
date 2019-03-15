@@ -24,3 +24,8 @@ Let's see
 ![4](charts/timepergas15.png)
 
 ![5](charts/timepergas20.png)
+
+
+And here's `SLOAD`
+
+![5](charts/sload.png)
