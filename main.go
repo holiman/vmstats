@@ -1,17 +1,20 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/ethereum/go-ethereum/params"
+	"github.com/wcharczuk/go-chart"
 	"io/ioutil"
 	"math/big"
 	"os"
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -80,7 +83,10 @@ func gasCost(op vm.OpCode, blnum *big.Int) uint64 {
 	case vm.EXTCODEHASH:
 		return gt.ExtcodeHash
 	case vm.SHL, vm.SHR, vm.SAR:
-		return vm.GasFastestStep
+		if params.MainnetChainConfig.IsConstantinople(blnum) {
+			return vm.GasFastestStep
+		}
+		return 0
 	case vm.CALL:
 		return gt.Calls
 	}
@@ -101,6 +107,7 @@ func (dp *dataPoint) gas() uint64 {
 func (dp *dataPoint) totalGas() uint64 {
 	return dp.count * dp.gas()
 }
+
 func (dp *dataPoint) mGasPerSec() float64 {
 	// gas / nanos * 1 000 M = gas / s
 	// (gas / 1000 000 ) / s = Mgas / s
@@ -108,6 +115,18 @@ func (dp *dataPoint) mGasPerSec() float64 {
 	// (gas * 1000 ) / nanos = Mgas/s
 	return float64(1000*dp.totalGas()) / float64(dp.execTime)
 }
+
+func (dp *dataPoint) MilliSecondsPerMgas() float64 {
+	// gas / nanos * 1 000 M = gas / s
+	// (gas / 1000 000 ) / s = Mgas / s
+	// (gas / 1M ) * 1000M / nanos = Mgas / s
+	// (gas * 1000 ) / nanos = Mgas/s
+	if dp.totalGas() == 0 {
+		return float64(0)
+	}
+	return float64(1000*dp.execTime) / float64(1000*dp.totalGas())
+}
+
 func (dp *dataPoint) String() string {
 
 	return fmt.Sprintf("number %s, op %s; gas %d; count %d; execTime %d;execTime  %s; totalGas %d; MgasPerS %.03f",
@@ -134,6 +153,9 @@ func (dp *dataPoint) CSV() string {
 }
 
 func (dp *dataPoint) Sub(prev *dataPoint) *dataPoint {
+	if prev == nil {
+		return dp
+	}
 	return &dataPoint{
 		blockNumber: dp.blockNumber,
 		execTime:    dp.execTime - prev.execTime,
@@ -162,30 +184,25 @@ func (stats *statCollection) collect(blnum int, data []byte) error {
 	stats.data[blnum] = make(map[vm.OpCode]*dataPoint)
 	for i := 0; i < 256; i++ {
 		metric := m[i]
-
-		if metric.Num > 0 {
-
-			op := vm.OpCode(i)
-			dp := &dataPoint{
-				op:          op,
-				blockNumber: new(big.Int).SetUint64(uint64(blnum)),
-				count:       metric.Num,
-				execTime:    metric.Time,
-			}
-			stats.data[blnum][op] = dp
+		op := vm.OpCode(i)
+		dp := &dataPoint{
+			op:          op,
+			blockNumber: new(big.Int).SetUint64(uint64(blnum)),
+			count:       metric.Num,
+			execTime:    metric.Time,
 		}
+		stats.data[blnum][op] = dp
 	}
 	return nil
 }
 
-func (stats *statCollection) chartMGasPerS() {
-	var opcodes = []vm.OpCode{vm.SLOAD, vm.BALANCE}
-	fmt.Printf("Number;")
-	for _, op := range opcodes {
-		fmt.Printf("%s;", op.String())
-	}
-	fmt.Println("")
-	// To store the numbers in slice in sorted order
+
+func (stats *statCollection) series(op vm.OpCode, yFunc func(point *dataPoint) float64) ([]float64, []float64) {
+
+	var (
+		xseries []float64
+		yseries []float64
+	)
 	var numbers []int
 	for k := range stats.data {
 		numbers = append(numbers, k)
@@ -193,27 +210,104 @@ func (stats *statCollection) chartMGasPerS() {
 	sort.Ints(numbers)
 
 	var prevBlock map[vm.OpCode]*dataPoint
-
 	for _, number := range numbers {
 		block := stats.data[number]
 		if prevBlock != nil {
-			fmt.Printf("%v;", number)
-			for _, op := range opcodes {
-				dp := block[op]
-				prevDp := prevBlock[op]
-				modDp := dp.Sub(prevDp)
-				fmt.Printf("%.02f;", modDp.mGasPerSec())
+			dp := block[op]
+			prevDp := prevBlock[op]
+			modDp := dp.Sub(prevDp)
+			// Only count it if it's been done more than 1000 times
+			if modDp.count > 1000{
+				yseries = append(yseries, yFunc(modDp))
+				xseries = append(xseries, float64(number))
 
-				//fmt.Printf("%s\n", modDp.CSV())
 			}
-			fmt.Println("")
 		}
 		prevBlock = block
 	}
+	return xseries, yseries
+}
+
+func plot(ops []vm.OpCode, stat statCollection, yFunc func(dp *dataPoint) float64, title, x, y, filename string) error {
+	var series []chart.Series
+	for _, op := range ops {
+		xvals, yvals := stat.series(op, yFunc)
+		serie := chart.ContinuousSeries{
+			XValues: xvals,
+			YValues: yvals,
+			Name:    op.String(),
+		}
+		smaSerie := chart.SMASeries{
+			InnerSeries:serie,
+			Name: serie.Name,
+		}
+		series = append(series, smaSerie)
+	}
+
+	graph := chart.Chart{
+		Title:      fmt.Sprintf(title),
+		TitleStyle: chart.StyleShow(),
+
+		XAxis: chart.XAxis{
+			Name:      x,
+			NameStyle: chart.StyleShow(),
+			Style:     chart.StyleShow(),
+		},
+		YAxis: chart.YAxis{
+			Name:      y,
+			NameStyle: chart.StyleShow(),
+			Style:     chart.StyleShow(),
+		},
+		Series: series,
+	}
+	graph.Elements = []chart.Renderable{
+		chart.LegendLeft(&graph),
+	}
+	buffer := bytes.NewBuffer([]byte{})
+	if err := graph.Render(chart.PNG, buffer); err != nil {
+		return err
+	}
+	if err := ioutil.WriteFile(fmt.Sprintf("./charts/%s", filename), buffer.Bytes(), 0644); err != nil {
+		return err
+	}
+	return nil
+}
+
+var mostOps = []vm.OpCode{
+	vm.STOP, vm.ADD, vm.SUB, vm.LT, vm.GT, vm.SLT, vm.SGT,
+	vm.EQ, vm.ISZERO, vm.AND, vm.OR, vm.XOR, vm.NOT, vm.BYTE, vm.CALLDATALOAD,
+	vm.MUL,
+	vm.DIV,
+	vm.SDIV, vm.MOD, vm.SMOD, vm.SIGNEXTEND,
+	vm.ADDMOD,
+	vm.MULMOD, vm.JUMP, vm.ADDRESS, vm.ORIGIN, vm.CALLER, vm.CALLVALUE,
+	vm.CALLDATASIZE, vm.CODESIZE, vm.GASPRICE, vm.COINBASE, vm.TIMESTAMP,
+	vm.NUMBER, vm.DIFFICULTY, vm.GASLIMIT, vm.POP, vm.PC, vm.MSIZE, vm.GAS,
+	vm.BLOCKHASH, vm.JUMPI, vm.JUMPDEST, vm.SLOAD, vm.EXTCODESIZE, vm.EXTCODECOPY,
+	vm.BALANCE, vm.EXTCODEHASH, vm.SHL,vm.SSTORE,
+	vm.SHR, vm.SAR, vm.CALL,
+}
+
+var someOps = []vm.OpCode{
+	vm.PUSH1,vm.PUSH2,
+	vm.PUSH32,
+	vm.ADDMOD,
+	vm.ADDRESS, vm.ORIGIN,
+	vm.CALLER,
+	vm.CALLVALUE,
+	vm.CALLDATASIZE, vm.CODESIZE, vm.GASPRICE, vm.COINBASE, vm.TIMESTAMP,
+	vm.NUMBER, vm.DIFFICULTY, vm.GASLIMIT, vm.POP, vm.PC, vm.MSIZE, vm.GAS,
+	vm.BLOCKHASH,
+	vm.JUMPI, vm.JUMPDEST,
+	vm.SLOAD,
+	vm.EXTCODESIZE,
+	vm.BALANCE, vm.EXTCODEHASH, vm.SHL,
+	vm.SHR, vm.SAR,
 }
 
 func main() {
-	dir := "./4760K_to_5040K"
+	//dir := "./4760K_to_5040K"
+	dir := "./m5d.2xlarge"
 	files, _ := ioutil.ReadDir(dir)
 
 	stat := newStatCollection()
@@ -233,10 +327,35 @@ func main() {
 		}
 		stat.collect(blnum, dat)
 	}
-	stat.chartMGasPerS()
-	// First run
-	//readFile("metrics_to_150000")
-	// Second run
-	//readFile("metrics_to_190000")
-	// third run, non-optimized, on other computer
+
+	var time = func(dp *dataPoint) float64 {
+		return float64(dp.execTime) / 1000000
+	}
+
+	if err := plot(mostOps, stat, time, "Time spent", "Blocknumber", "Milliseconds",
+		"timespent.png"); err != nil {
+		fmt.Printf("Error: %v", err)
+		syscall.Exit(1)
+	}
+
+	var timepergas = func(dp *dataPoint) float64 {
+		return dp.MilliSecondsPerMgas()
+	}
+	var i = 0
+	for i := 0; i + 5 < len(someOps); i+= 5{
+
+		if err := plot(someOps[i:i+5], stat, timepergas,
+			"Millseconds per Mgas", "Blocknumber", "Milliseconds",
+			fmt.Sprintf("timepergas%d.png", i)); err != nil {
+			fmt.Printf("Error: %v", err)
+			syscall.Exit(1)
+		}
+
+	}
+	if err := plot(someOps[i:i+5], stat, timepergas,
+		"Millseconds per Mgas", "Blocknumber", "Milliseconds",
+		fmt.Sprintf("timepergas%d.png", i)); err != nil {
+		fmt.Printf("Error: %v", err)
+		syscall.Exit(1)
+	}
 }
