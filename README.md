@@ -1,6 +1,12 @@
 This repo is a collection of vm statistics, 
 gathered from a geth instance. 
 
+Every data point represents `10k` blocks. 
+All opcodes are not represented in the charts.
+
+For time spent, most  opcodes are present. 
+For `Cost of ops`, only those with a static cost are included.
+
 Examples from a `m5.2xlargge` aws instance that did a full-sync. 
 
 ### Time spent

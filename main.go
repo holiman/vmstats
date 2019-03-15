@@ -358,4 +358,12 @@ func main() {
 		fmt.Printf("Error: %v", err)
 		syscall.Exit(1)
 	}
+
+	if err := plot([]vm.OpCode{vm.SLOAD}, stat, timepergas,
+		"Millseconds per Mgas (SLOAD)", "Blocknumber", "Milliseconds",
+		fmt.Sprintf("sload.png")); err != nil {
+		fmt.Printf("Error: %v", err)
+		syscall.Exit(1)
+	}
+
 }
