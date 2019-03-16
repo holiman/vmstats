@@ -198,6 +198,15 @@ func (stats *statCollection) series(op vm.OpCode, fromBlock int, yFunc func(poin
 	return xseries, yseries
 }
 
+func (stats *statCollection) numbers() []int {
+	var numbers []int
+	for k := range stats.data {
+		numbers = append(numbers, k)
+	}
+	sort.Ints(numbers)
+	return numbers
+}
+
 // Construct a filter, which returns true if the any value in the given series is above the threshold
 func minFilter(threshold float64) func([]float64) bool {
 
@@ -460,6 +469,69 @@ func init() {
 	}
 }
 
+func pie(filename string, stat statCollection, start, end int) error {
+	timeGraph := chart.PieChart{
+		Width:      600,
+		Height:     800,
+		Title:      fmt.Sprintf("Blocks %d to %d - Time spent", start, end),
+		TitleStyle: chart.StyleShow(),
+	}
+	countGraph := chart.PieChart{
+		Width:      600,
+		Height:     800,
+		Title:      fmt.Sprintf("Blocks %d to %d - Total count", start, end),
+		TitleStyle: chart.StyleShow(),
+	}
+	// Get the aggregate from blocks 0 to end
+	//blnums := stat.numbers()
+	// Aggregate is in the last one
+	//lastBlock := blnums[len(blnums) -1]
+
+	lastStat := stat.data[end]
+	firstStat := stat.data[start]
+	var timeValues []chart.Value
+	var countValues []chart.Value
+	var zero = &dataPoint{}
+	for op := vm.OpCode(0); op < 255; op++ {
+		dpStart := firstStat[op]
+
+		if dpStart == nil {
+			dpStart = zero
+		}
+		dpEnd := lastStat[op]
+		if dpEnd.count > 0 {
+			timeValues = append(timeValues, chart.Value{
+				Value: float64(dpEnd.execTime) - float64(dpStart.execTime),
+				Label: op.String(),
+			})
+			countValues = append(countValues, chart.Value{
+				Value: float64(dpEnd.count) - float64(dpStart.count),
+				Label: op.String(),
+			})
+		}
+	}
+	timeGraph.Values = timeValues
+	countGraph.Values = countValues
+
+	buffer := bytes.NewBuffer([]byte{})
+	if err := timeGraph.Render(chart.PNG, buffer); err != nil {
+		return err
+	}
+	if err := ioutil.WriteFile(fmt.Sprintf("./charts/%s-time.png", filename), buffer.Bytes(), 0644); err != nil {
+		return err
+	}
+	buffer = bytes.NewBuffer([]byte{})
+	if err := countGraph.Render(chart.PNG, buffer); err != nil {
+		return err
+	}
+	if err := ioutil.WriteFile(fmt.Sprintf("./charts/%s-count.png", filename), buffer.Bytes(), 0644); err != nil {
+		return err
+	}
+
+	return nil
+
+}
+
 func main() {
 	//dir := "./4760K_to_5040K"
 	dir := "./m5d.2xlarge"
@@ -492,6 +564,22 @@ func main() {
 			return v
 		}
 		return 100000
+	}
+
+	// Let's make some donuts aswell
+	var donut = 0
+	for ; donut < 6; donut++ {
+		if err := pie(fmt.Sprintf("total-pie-%d", donut),
+			stat, donut*1000000, (donut+1)*1000000); err != nil {
+			fmt.Printf("Error: %v", err)
+			syscall.Exit(1)
+		}
+	}
+	// We don't have everything up to 7M yet
+	if err := pie(fmt.Sprintf("total-pie-%d", donut),
+		stat, donut*1000000, 6840000); err != nil {
+		fmt.Printf("Error: %v", err)
+		syscall.Exit(1)
 	}
 
 	if err := plot(allOps, stat, time, "Time spent", "Blocknumber", "Milliseconds", "timespent.png"); err != nil {

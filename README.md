@@ -30,6 +30,39 @@ It seems that aside from `SLOAD`, there's no other single operation that dominat
 is spent on block processing. 
 
 
+#### Time Pies!
+
+Let's see how the time spent has progressed through time. 
+
+![](charts/total-pie-0-time.png)
+![](charts/total-pie-1-time.png)
+![](charts/total-pie-2-time.png)
+
+The `2-3M` range contains the shanghai attacks. 
+
+![](charts/total-pie-3-time.png)
+![](charts/total-pie-4-time.png)
+
+In the `3M-4M` range, we start seeing `SLOAD` take a larger piece of the pie. 
+
+![](charts/total-pie-5-time.png)
+![](charts/total-pie-6-time.png)
+
+... and accounting for ~`50%` between `5M` and `6M`. 
+
+## Count Pies!
+
+We can also look at the _prevalence_ of opcodes -- that is, how _common_ is an opcode, and how has that varied over time? 
+
+![](charts/total-pie-0-count.png)
+![](charts/total-pie-1-count.png)
+![](charts/total-pie-2-count.png)
+![](charts/total-pie-3-count.png)
+![](charts/total-pie-4-count.png)
+![](charts/total-pie-5-count.png)
+![](charts/total-pie-6-count.png)
+
+
 ## Cost of ops
 
 Are operations well-balanced, gas-wise?
