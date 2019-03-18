@@ -209,3 +209,21 @@ or exiting from call contexts.
 ## BALANCE
 
 ![5](charts/balance.png)
+
+## So what's the most 'heavy'
+
+If 'heavy' means large time per gas unit. Here are some charts, where you can also 
+see the actual cost. For the really cheap opcodes, like `PC`, those are probably
+over-represented, since they are so brief that the actual execution is in roughly on the same 
+order of magnitude as actually performing the measurement. 
+
+Anyway, some graphs:
+
+![](charts/total-bars-0-time.png)
+![](charts/total-bars-1-time.png)
+![](charts/total-bars-2-time.png)
+![](charts/total-bars-3-time.png)
+![](charts/total-bars-4-time.png)
+![](charts/total-bars-5-time.png)
+![](charts/total-bars-6-time.png)
+![](charts/total-bars-7-time.png)

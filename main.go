@@ -33,7 +33,7 @@ func gasCost(op vm.OpCode, blnum *big.Int) uint64 {
 	case vm.STOP:
 		return 0
 	case vm.ADD, vm.SUB, vm.LT, vm.GT, vm.SLT, vm.SGT, vm.EQ, vm.ISZERO, vm.AND, vm.OR, vm.XOR, vm.NOT,
-		vm.BYTE, vm.CALLDATALOAD:
+		vm.BYTE: // vm.CALLDATALOAD also has memory expansion
 		return vm.GasFastestStep
 	case vm.MUL, vm.DIV, vm.SDIV, vm.MOD, vm.SMOD, vm.SIGNEXTEND:
 		return vm.GasFastStep
@@ -77,8 +77,8 @@ func gasCost(op vm.OpCode, blnum *big.Int) uint64 {
 		return gt.SLoad
 	case vm.EXTCODESIZE:
 		return gt.ExtcodeSize
-	case vm.EXTCODECOPY:
-		return gt.ExtcodeCopy
+	//case vm.EXTCODECOPY: -- cost depends on stack values
+	//	return gt.ExtcodeCopy
 	case vm.BALANCE:
 		return gt.Balance
 	case vm.EXTCODEHASH:
@@ -532,6 +532,69 @@ func pie(filename string, stat statCollection, start, end int) error {
 
 }
 
+func barchart(filename string, stat statCollection, start, end int) error {
+	g := chart.BarChart{
+		Width: 1000,
+
+		Title:      fmt.Sprintf("Blocks %d to %d - Time per gas (Top 25)", start, end),
+		TitleStyle: chart.StyleShow(),
+		XAxis: chart.Style{
+			Show:                true,
+			TextRotationDegrees: 90.0,
+		},
+		Background: chart.Style{
+			Padding: chart.Box{
+				Top:    40,
+				Bottom: 80,
+			},
+		},
+		BarWidth: 20,
+		YAxis: chart.YAxis{
+			Style: chart.StyleShow(),
+		},
+	}
+
+	lastStat := stat.data[end]
+	firstStat := stat.data[start]
+	var vals []chart.Value
+
+	var zero = &dataPoint{}
+	fmt.Printf("--------\n")
+	for op := vm.OpCode(0); op < 255; op++ {
+		dpStart := firstStat[op]
+
+		if dpStart == nil {
+			dpStart = zero
+		}
+		dpEnd := lastStat[op]
+		if dpEnd.count > 0 {
+			modDp := dpEnd.Sub(dpStart)
+
+			vals = append(vals, chart.Value{
+				Value: modDp.MilliSecondsPerMgas(),
+				Label: fmt.Sprintf("%v (%d)", op.String(), gasCost(op, modDp.blockNumber)),
+			})
+		}
+	}
+	sort.Slice(vals, func(i, j int) bool {
+		return vals[i].Value > vals[j].Value
+	})
+	// Only use the top 25
+	vals = vals[:25]
+	g.Bars = vals
+
+	buffer := bytes.NewBuffer([]byte{})
+	if err := g.Render(chart.PNG, buffer); err != nil {
+		return err
+	}
+	if err := ioutil.WriteFile(fmt.Sprintf("./charts/%s-time.png", filename), buffer.Bytes(), 0644); err != nil {
+		return err
+	}
+
+	return nil
+
+}
+
 func main() {
 	//dir := "./4760K_to_5040K"
 	dir := "./m5d.2xlarge"
@@ -565,21 +628,25 @@ func main() {
 		}
 		return 100000
 	}
+	// And let's make some bar charts over the time per gas
+	var barch = 0
+	for ; barch < 7; barch++ {
+		if err := barchart(fmt.Sprintf("total-bars-%d", barch),
+			stat, barch*1000000, (barch+1)*1000000); err != nil {
+			fmt.Printf("Error: %v", err)
+			syscall.Exit(1)
+		}
+	}
 
+	//syscall.Exit(1)
 	// Let's make some donuts aswell
 	var donut = 0
-	for ; donut < 6; donut++ {
+	for ; donut < 7; donut++ {
 		if err := pie(fmt.Sprintf("total-pie-%d", donut),
 			stat, donut*1000000, (donut+1)*1000000); err != nil {
 			fmt.Printf("Error: %v", err)
 			syscall.Exit(1)
 		}
-	}
-	// We don't have everything up to 7M yet
-	if err := pie(fmt.Sprintf("total-pie-%d", donut),
-		stat, donut*1000000, 6840000); err != nil {
-		fmt.Printf("Error: %v", err)
-		syscall.Exit(1)
 	}
 
 	if err := plot(allOps, stat, time, "Time spent", "Blocknumber", "Milliseconds", "timespent.png"); err != nil {
