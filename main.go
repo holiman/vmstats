@@ -222,14 +222,18 @@ func minFilter(threshold float64) func([]float64) bool {
 
 type filterFn func(vals []float64) bool
 
-func plot(ops []vm.OpCode, stat statCollection, yFunc func(dp *dataPoint) float64, title, x, y, filename string) error {
+func plot(ops []vm.OpCode, stat statCollection, yFunc func(dp *dataPoint) float64, title, x, y, filename string) (string, error) {
 	return plotFilter(ops, stat, yFunc, title, x, y, filename, nil, 0)
 }
-func plotFilter(ops []vm.OpCode, stat statCollection, yFunc func(dp *dataPoint) float64, title, x, y, filename string, filter filterFn, fromBlock int) error {
+func plotFilter(ops []vm.OpCode, stat statCollection, yFunc func(dp *dataPoint) float64, title, x, y, filename string, filter filterFn, fromBlock int) (string, error) {
 	showCount := len(ops) == 1
 	annotations := chart.AnnotationSeries{
 		Annotations: []chart.Value2{
-			{XValue: 2463000.0, YValue: 0, Label: "EIP150"},
+			{XValue: 1920000.0, YValue: 0, Label: "DaoFork"},
+			{XValue: 2463000.0, YValue: 0, Label: "EIP150/TW"},
+			{XValue: 2675000.0, YValue: 0, Label: "EIP155/SD"},
+			{XValue: 4370000.0, YValue: 0, Label: "Byzantium"},
+			{XValue: 7280000.0, YValue: 0, Label: "Constantinople"},
 		}}
 
 	var series []chart.Series
@@ -306,12 +310,13 @@ func plotFilter(ops []vm.OpCode, stat statCollection, yFunc func(dp *dataPoint) 
 	}
 	buffer := bytes.NewBuffer([]byte{})
 	if err := graph.Render(chart.PNG, buffer); err != nil {
-		return err
+		return "", err
 	}
-	if err := ioutil.WriteFile(fmt.Sprintf("./charts/%s", filename), buffer.Bytes(), 0644); err != nil {
-		return err
+	path := fmt.Sprintf("./charts/%s", filename)
+	if err := ioutil.WriteFile(path, buffer.Bytes(), 0644); err != nil {
+		return path, err
 	}
-	return nil
+	return path, nil
 }
 
 var RANGE0 = []vm.OpCode{
@@ -532,11 +537,10 @@ func pie(filename string, stat statCollection, start, end int) error {
 
 }
 
-func barchart(filename string, stat statCollection, start, end int) error {
+func barchart(filename, runinfo string, stat statCollection, start, end int) (string, error) {
 	g := chart.BarChart{
 		Width: 1000,
-
-		Title:      fmt.Sprintf("Blocks %d to %d - Time per gas (Top 25)", start, end),
+		//Title:      fmt.Sprintf("Blocks %d to %d - Time per gas (Top 25)\n %v (excluding < 1 exec per block)", start, end, runinfo),
 		TitleStyle: chart.StyleShow(),
 		XAxis: chart.Style{
 			Show:                true,
@@ -558,7 +562,10 @@ func barchart(filename string, stat statCollection, start, end int) error {
 	firstStat := stat.data[start]
 	var vals []chart.Value
 
-	var zero = &dataPoint{}
+	var zero = &dataPoint{
+		blockNumber:new(big.Int),
+
+	}
 	fmt.Printf("--------\n")
 	for op := vm.OpCode(0); op < 255; op++ {
 		dpStart := firstStat[op]
@@ -567,6 +574,19 @@ func barchart(filename string, stat statCollection, start, end int) error {
 			dpStart = zero
 		}
 		dpEnd := lastStat[op]
+		if dpEnd == nil {
+			return "", fmt.Errorf("data missing for %d", end)
+		}
+		if dpEnd.blockNumber == nil || dpStart.blockNumber == nil {
+			continue
+		}
+		// exclude those that are executed less than once per
+		nBlocks := dpEnd.blockNumber.Uint64() - dpStart.blockNumber.Uint64()
+		nExecs := dpEnd.count - dpStart.count
+		//fmt.Printf("nBlocks %d, nExecs %d\n", nBlocks, nExecs)
+		if nBlocks > nExecs {
+			continue
+		}
 		if dpEnd.count > 0 {
 			modDp := dpEnd.Sub(dpStart)
 
@@ -580,23 +600,88 @@ func barchart(filename string, stat statCollection, start, end int) error {
 		return vals[i].Value > vals[j].Value
 	})
 	// Only use the top 25
-	vals = vals[:25]
+	if len(vals) > 25 {
+		vals = vals[:25]
+	}
+	g.Title = fmt.Sprintf("Blocks %d to %d - Time per gas (Top %d)\n %v (excluding < 1 exec per block)", start, end, len(vals), runinfo)
+
 	g.Bars = vals
 
 	buffer := bytes.NewBuffer([]byte{})
 	if err := g.Render(chart.PNG, buffer); err != nil {
-		return err
+		return "", err
 	}
-	if err := ioutil.WriteFile(fmt.Sprintf("./charts/%s-time.png", filename), buffer.Bytes(), 0644); err != nil {
-		return err
+	path := fmt.Sprintf("./charts/%s.png", filename)
+	if err := ioutil.WriteFile(path, buffer.Bytes(), 0644); err != nil {
+		return "", err
 	}
 
-	return nil
+	return path, nil
 
 }
 
 func main() {
-	//dir := "./4760K_to_5040K"
+	barcharts("./m5d.2xlarge.run3", "run3")
+	barcharts("./m5d.2xlarge.run2", "run2")
+	barcharts("./m5d.2xlarge", "run1")
+
+}
+
+func barcharts(dir, info string) {
+	files, _ := ioutil.ReadDir(dir)
+
+	stat := newStatCollection()
+	for _, fStat := range files {
+		if fStat.IsDir() {
+			continue
+		}
+		if !strings.HasPrefix(fStat.Name(), "metrics_to") {
+			continue
+		}
+		blockstring := strings.Split(fStat.Name(), "_")[2]
+		blnum, _ := strconv.Atoi(blockstring)
+		dat, err := ioutil.ReadFile(fmt.Sprintf("%s/%s", dir, fStat.Name()))
+		if err != nil {
+			fmt.Printf("error: %v", err)
+			os.Exit(1)
+		}
+		stat.collect(blnum, dat)
+	}
+	for _, op := range []vm.OpCode{vm.BLOCKHASH, vm.SLOAD, vm.BALANCE} {
+
+		fmt.Printf("Plotting %v\n", op)
+		var timepergas = func(dp *dataPoint) float64 {
+			return dp.MilliSecondsPerMgas()
+		}
+
+		fname := fmt.Sprintf("%v-%v.png", op, info)
+		path, err := plot([]vm.OpCode{op}, stat, timepergas,
+			fmt.Sprintf("Milliseconds per Mgas (%v) - %v", op, info),
+			"Blocknumber", "Milliseconds", fname)
+		if err != nil {
+			fmt.Printf("Error %v", err)
+		} else {
+			fmt.Println(path)
+		}
+	}
+
+	// And let's make some bar charts over the time per gas
+	var barch = 0
+	for ; barch < 7; barch++ {
+		if file, err := barchart(fmt.Sprintf("%v.total-bars-%d", info, barch), info,
+			stat, barch*1000000, (barch+1)*1000000); err != nil {
+			fmt.Printf("Error: %v", err)
+			break
+			//syscall.Exit(1)
+		} else {
+			fmt.Println(file)
+		}
+	}
+
+}
+
+func firstRun() {
+
 	dir := "./m5d.2xlarge"
 	files, _ := ioutil.ReadDir(dir)
 
@@ -628,17 +713,7 @@ func main() {
 		}
 		return 100000
 	}
-	// And let's make some bar charts over the time per gas
-	var barch = 0
-	for ; barch < 7; barch++ {
-		if err := barchart(fmt.Sprintf("total-bars-%d", barch),
-			stat, barch*1000000, (barch+1)*1000000); err != nil {
-			fmt.Printf("Error: %v", err)
-			syscall.Exit(1)
-		}
-	}
 
-	//syscall.Exit(1)
 	// Let's make some donuts aswell
 	var donut = 0
 	for ; donut < 7; donut++ {
@@ -649,11 +724,11 @@ func main() {
 		}
 	}
 
-	if err := plot(allOps, stat, time, "Time spent", "Blocknumber", "Milliseconds", "timespent.png"); err != nil {
+	if _, err := plot(allOps, stat, time, "Time spent", "Blocknumber", "Milliseconds", "timespent.png"); err != nil {
 		fmt.Printf("Error: %v", err)
 		syscall.Exit(1)
 	}
-	if err := plotFilter(allOps, stat, timeCapped, "Time spent", "Blocknumber", "Milliseconds",
+	if _, err := plotFilter(allOps, stat, timeCapped, "Time spent", "Blocknumber", "Milliseconds",
 		"timespentCapped.png", minFilter(45000), 3220000); err != nil {
 		fmt.Printf("Error: %v", err)
 		syscall.Exit(1)
@@ -672,93 +747,93 @@ func main() {
 		}
 	}
 
-	if err := plot(RANGE0, stat, timepergas,
+	if _, err := plot(RANGE0, stat, timepergas,
 		"Milliseconds per Mgas (0x00 opcodes - Arithmetic)", "Blocknumber", "Milliseconds",
 		fmt.Sprintf("arithmetics.png")); err != nil {
 		fmt.Printf("Error: %v", err)
 		syscall.Exit(1)
 	}
 
-	if err := plot(RANGE0, stat, timepergasCapAt(250.0),
+	if _, err := plot(RANGE0, stat, timepergasCapAt(250.0),
 		"Milliseconds per Mgas (0x00 opcodes - Arithmetic) - capped", "Blocknumber", "Milliseconds",
 		fmt.Sprintf("arithmetics_cap.png")); err != nil {
 		fmt.Printf("Error: %v", err)
 		syscall.Exit(1)
 	}
 
-	if err := plot(RANGE1, stat, timepergasCapAt(250.0),
+	if _, err := plot(RANGE1, stat, timepergasCapAt(250.0),
 		"Milliseconds per Mgas (0x10 opcodes - Comparison)", "Blocknumber", "Milliseconds",
 		fmt.Sprintf("comparison_cap.png")); err != nil {
 		fmt.Printf("Error: %v", err)
 		syscall.Exit(1)
 	}
-	if err := plot(RANGE2, stat, time,
+	if _, err := plot(RANGE2, stat, time,
 		"Time spent on (0x30 opcodes - SHA3)", "Blocknumber", "Milliseconds",
 		fmt.Sprintf("sha3.png")); err != nil {
 		fmt.Printf("Error: %v", err)
 		syscall.Exit(1)
 	}
-	if err := plot(RANGE3p1, stat, timepergasCapAt(500.0),
+	if _, err := plot(RANGE3p1, stat, timepergasCapAt(500.0),
 		"Milliseconds per Mgas (0x30 opcodes - Context, part 1)", "Blocknumber", "Milliseconds",
 		fmt.Sprintf("context1.png")); err != nil {
 		fmt.Printf("Error: %v", err)
 		syscall.Exit(1)
 	}
-	if err := plot(RANGE3p2, stat, timepergasCapAt(500.0),
+	if _, err := plot(RANGE3p2, stat, timepergasCapAt(500.0),
 		"Milliseconds per Mgas (0x30 opcodes - Context, part 2)", "Blocknumber", "Milliseconds",
 		fmt.Sprintf("context2.png")); err != nil {
 		fmt.Printf("Error: %v", err)
 		syscall.Exit(1)
 	}
 
-	if err := plot(RANGE4, stat, timepergasCapAt(600.0),
+	if _, err := plot(RANGE4, stat, timepergasCapAt(600.0),
 		"Milliseconds per Mgas (0x40 opcodes - Block ops)", "Blocknumber", "Milliseconds",
 		fmt.Sprintf("blockops_cap.png")); err != nil {
 		fmt.Printf("Error: %v", err)
 		syscall.Exit(1)
 	}
 
-	if err := plot(RANGE4p2, stat, timepergasCapAt(3000.0),
+	if _, err := plot(RANGE4p2, stat, timepergasCapAt(3000.0),
 		"Milliseconds per Mgas (BLOCKHASH)", "Blocknumber", "Milliseconds",
 		fmt.Sprintf("blockhash.png")); err != nil {
 		fmt.Printf("Error: %v", err)
 		syscall.Exit(1)
 	}
 
-	if err := plot(RANGE5p1, stat, timepergasCapAt(3000.0),
+	if _, err := plot(RANGE5p1, stat, timepergasCapAt(3000.0),
 		"Milliseconds per Mgas (0x50 Storage and execution - part 1)", "Blocknumber", "Milliseconds",
 		fmt.Sprintf("storage1.png")); err != nil {
 		fmt.Printf("Error: %v", err)
 		syscall.Exit(1)
 	}
-	if err := plot(RANGE6, stat, timepergasCapAt(600.0),
+	if _, err := plot(RANGE6, stat, timepergasCapAt(600.0),
 		"Milliseconds per Mgas (0x60 Pops, Swaps, Dups)", "Blocknumber", "Milliseconds",
 		fmt.Sprintf("range60.png")); err != nil {
 		fmt.Printf("Error: %v", err)
 		syscall.Exit(1)
 	}
 
-	if err := plot(RANGE6, stat, timepergasCapAt(100.0),
+	if _, err := plot(RANGE6, stat, timepergasCapAt(100.0),
 		"Milliseconds per Mgas (0x60 Pops, Swaps, Dups) - capped at 100", "Blocknumber", "Milliseconds",
 		fmt.Sprintf("range60p2.png")); err != nil {
 		fmt.Printf("Error: %v", err)
 		syscall.Exit(1)
 	}
 
-	if err := plot(RANGE7, stat, time,
+	if _, err := plot(RANGE7, stat, time,
 		"Time spent on log operations (0x70 LOG) ", "Blocknumber", "Milliseconds",
 		fmt.Sprintf("logging.png")); err != nil {
 		fmt.Printf("Error: %v", err)
 		syscall.Exit(1)
 	}
 
-	if err := plot([]vm.OpCode{vm.SLOAD}, stat, timepergas,
+	if _, err := plot([]vm.OpCode{vm.SLOAD}, stat, timepergas,
 		"Milliseconds per Mgas (SLOAD)", "Blocknumber", "Milliseconds",
 		fmt.Sprintf("sload.png")); err != nil {
 		fmt.Printf("Error: %v", err)
 		syscall.Exit(1)
 	}
-	if err := plot([]vm.OpCode{vm.BALANCE}, stat, timepergas,
+	if _, err := plot([]vm.OpCode{vm.BALANCE}, stat, timepergas,
 		"Milliseconds per Mgas (BALANCE)", "Blocknumber", "Milliseconds",
 		fmt.Sprintf("balance.png")); err != nil {
 		fmt.Printf("Error: %v", err)
